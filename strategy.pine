@@ -1,1 +1,107 @@
-//@version=6 strategy("NIFTY 5m — 9-EMA Break & Confirm (Vol Filter) — v6 (index-driven, no lag)", overlay=true, initial_capital=100000, pyramiding=0, commission_type=strategy.commission.percent, commission_value=0.01, calc_on_order_fills=true, calc_on_every_tick=false, process_orders_on_close=true) // ── Inputs ── useStrict5m = input.bool(true, "Warn if chart is not 5m") emaLen = input.int(9, "EMA Length (5m)", minval=1) showEMA = input.bool(true, "Plot EMA") qty = input.int(1, "Order Qty", minval=1) // ── 5m sanity ── is5m = timeframe.isintraday and str.tostring(timeframe.multiplier) == "5" if useStrict5m and not is5m label.new(bar_index, high, "⚠️ Use 5m chart for intended behavior.", style=label.style_label_down, textcolor=color.white, color=color.new(color.red, 0)) // ── EMA ── ema5 = ta.ema(close, emaLen) plot(showEMA ? ema5 : na, title="EMA (length)", color=color.new(color.blue, 0), linewidth=2) // ── Always compute cross (stateful funcs must run every bar) ── crossUpRaw = ta.crossover(close, ema5) crossDownRaw = ta.crossunder(close, ema5) // ── State machine ── /* phase: 0 = idle 1 = after cross bar closed (next bar is ALERT bar) 2 = decision bar (2nd after cross) */ var int phase = 0 var int dir = 0 // +1 long, -1 short var int crossIdx = na var float crossVol = na var float crossClose = na confirmed = barstate.isconfirmed // On the bar that CLOSES with a cross → stamp index & stats if confirmed and (crossUpRaw or crossDownRaw) dir := crossUpRaw ? 1 : -1 phase := 1 crossIdx := bar_index crossVol := volume crossClose := close // Bar offsets from stamped cross bar barsFromCross = confirmed and crossIdx != na ? bar_index - crossIdx : na // ── Rules by exact bar offset ── // ALERT bar = first full candle after cross (offset == 1) alertSignLong = confirmed and dir == 1 and phase == 1 and barsFromCross == 1 and close > ema5 alertSignShort = confirmed and dir == -1 and phase == 1 and barsFromCross == 1 and close < ema5 // If ALERT bar fails to stay on crossed side → reset if confirmed and phase == 1 and barsFromCross == 1 ok1 = dir == 1 ? close > ema5 : close < ema5 if not ok1 phase := 0 dir := 0 // DECISION bar = second bar after cross (offset == 2) longSignal = confirmed and dir == 1 and phase <= 2 and barsFromCross == 2 and close > ema5 and volume > crossVol shortSignal = confirmed and dir == -1 and phase <= 2 and barsFromCross == 2 and close < ema5 and volume > crossVol invLong = confirmed and dir == 1 and barsFromCross == 2 and close < crossClose invShort = confirmed and dir == -1 and barsFromCross == 2 and close > crossClose // Advance phase at end of each confirmed bar if confirmed and phase == 1 and barsFromCross == 1 phase := 2 else if confirmed and phase == 2 and barsFromCross >= 2 // Past decision bar → back to idle (whether we traded or not) phase := 0 dir := 0 // ── Orders & alerts on SAME bar close ── sym = syminfo.ticker, tfr = timeframe.period if longSignal and not invLong strategy.entry("Long", strategy.long, qty=qty, alert_message="BUY @ " + str.tostring(close) + " | " + sym + " " + tfr + " | vol " + str.tostring(volume) + " > crossVol " + str.tostring(crossVol)) alert("BUY: " + sym + " " + tfr, alert.freq_once_per_bar_close) phase := 0, dir := 0 else if shortSignal and not invShort strategy.entry("Short", strategy.short, qty=qty, alert_message="SELL @ " + str.tostring(close) + " | " + sym + " " + tfr + " | vol " + str.tostring(volume) + " > crossVol " + str.tostring(crossVol)) alert("SELL: " + sym + " " + tfr, alert.freq_once_per_bar_close) phase := 0, dir := 0 // ── Visual markers (draw on the bar that just CLOSED) ── plotshape(alertSignLong, title="AlertSign Long", style=shape.triangleup, location=location.belowbar, size=size.tiny, color=color.new(color.green, 0), text="ALRT") plotshape(alertSignShort, title="AlertSign Short", style=shape.triangledown, location=location.abovebar, size=size.tiny, color=color.new(color.red, 0), text="ALRT") plotshape(longSignal and not invLong, title="BUY", style=shape.labelup, location=location.belowbar, text="BUY", size=size.small, color=color.new(color.green, 0), textcolor=color.white) plotshape(shortSignal and not invShort, title="SELL", style=shape.labeldown, location=location.abovebar, text="SELL", size=size.small, color=color.new(color.red, 0), textcolor=color.white)
+//@version=6
+strategy("NIFTY 5m — 9-EMA Break & Confirm (Vol Filter) — v6 (index-driven, no lag)", 
+         overlay=true, 
+         initial_capital=100000, 
+         pyramiding=0, 
+         commission_type=strategy.commission.percent, 
+         commission_value=0.01, 
+         calc_on_order_fills=true, 
+         calc_on_every_tick=false, 
+         process_orders_on_close=true)
+
+// ── Inputs ──
+useStrict5m = input.bool(true, "Warn if chart is not 5m")
+emaLen = input.int(9, "EMA Length (5m)", minval=1)
+showEMA = input.bool(true, "Plot EMA")
+qty = input.int(1, "Order Qty", minval=1)
+
+// ── 5m sanity ──
+is5m = timeframe.isintraday and str.tostring(timeframe.multiplier) == "5"
+if useStrict5m and not is5m
+    label.new(bar_index, high, "⚠️ Use 5m chart for intended behavior.", 
+              style=label.style_label_down, 
+              textcolor=color.white, 
+              color=color.new(color.red, 0))
+
+// ── EMA ──
+ema5 = ta.ema(close, emaLen)
+plot(showEMA ? ema5 : na, title="EMA (length)", color=color.new(color.blue, 0), linewidth=2)
+
+// ── Always compute cross (stateful funcs must run every bar) ──
+crossUpRaw = ta.crossover(close, ema5)
+crossDownRaw = ta.crossunder(close, ema5)
+
+// ── State machine ──
+/* phase: 
+   0 = idle
+   1 = after cross bar closed (next bar is ALERT bar)
+   2 = decision bar (2nd after cross)
+*/
+var int phase = 0
+var int dir = 0  // +1 long, -1 short
+var int crossIdx = na
+var float crossVol = na
+var float crossClose = na
+
+confirmed = barstate.isconfirmed
+
+// On the bar that CLOSES with a cross → stamp index & stats
+if confirmed and (crossUpRaw or crossDownRaw)
+    dir := crossUpRaw ? 1 : -1
+    phase := 1
+    crossIdx := bar_index
+    crossVol := volume
+    crossClose := close
+
+// Bar offsets from stamped cross bar
+barsFromCross = confirmed and crossIdx != na ? bar_index - crossIdx : na
+
+// ── Rules by exact bar offset ──
+// ALERT bar = first full candle after cross (offset == 1)
+alertSignLong = confirmed and dir == 1 and phase == 1 and barsFromCross == 1 and close > ema5
+alertSignShort = confirmed and dir == -1 and phase == 1 and barsFromCross == 1 and close < ema5
+
+// If ALERT bar fails to stay on crossed side → reset
+if confirmed and phase == 1 and barsFromCross == 1
+    ok1 = dir == 1 ? close > ema5 : close < ema5
+    if not ok1
+        phase := 0
+        dir := 0
+
+// DECISION bar = second bar after cross (offset == 2)
+longSignal = confirmed and dir == 1 and phase <= 2 and barsFromCross == 2 and close > ema5 and volume > crossVol
+shortSignal = confirmed and dir == -1 and phase <= 2 and barsFromCross == 2 and close < ema5 and volume > crossVol
+
+invLong = confirmed and dir == 1 and barsFromCross == 2 and close < crossClose
+invShort = confirmed and dir == -1 and barsFromCross == 2 and close > crossClose
+
+// Advance phase at end of each confirmed bar
+if confirmed and phase == 1 and barsFromCross == 1
+    phase := 2
+else if confirmed and phase == 2 and barsFromCross >= 2
+    // Past decision bar → back to idle (whether we traded or not)
+    phase := 0
+    dir := 0
+
+// ── Orders & alerts on SAME bar close ──
+sym = syminfo.ticker
+tfr = timeframe.period
+
+if longSignal and not invLong
+    strategy.entry("Long", strategy.long, qty=qty, 
+                   alert_message="BUY @ " + str.tostring(close) + " | " + sym + " " + tfr + " | vol " + str.tostring(volume) + " > crossVol " + str.tostring(crossVol))
+    alert("BUY: " + sym + " " + tfr, alert.freq_once_per_bar_close)
+    phase := 0
+    dir := 0
+else if shortSignal and not invShort
+    strategy.entry("Short", strategy.short, qty=qty, 
+                   alert_message="SELL @ " + str.tostring(close) + " | " + sym + " " + tfr + " | vol " + str.tostring(volume) + " > crossVol " + str.tostring(crossVol))
+    alert("SELL: " + sym + " " + tfr, alert.freq_once_per_bar_close)
+    phase := 0
+    dir := 0
+
+// ── Visual markers (draw on the bar that just CLOSED) ──
+plotshape(alertSignLong, title="AlertSign Long", style=shape.triangleup, location=location.belowbar, size=size.tiny, color=color.new(color.green, 0), text="ALRT")
+plotshape(alertSignShort, title="AlertSign Short", style=shape.triangledown, location=location.abovebar, size=size.tiny, color=color.new(color.red, 0), text="ALRT")
+plotshape(longSignal and not invLong, title="BUY", style=shape.labelup, location=location.belowbar, text="BUY", size=size.small, color=color.new(color.green, 0), textcolor=color.white)
+plotshape(shortSignal and not invShort, title="SELL", style=shape.labeldown, location=location.abovebar, text="SELL", size=size.small, color=color.new(color.red, 0), textcolor=color.white)
